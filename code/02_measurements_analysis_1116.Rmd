@@ -586,7 +586,7 @@ meas_factor_levels <- list(
   sex_category             = c("male", "female"),
   ethnicity_category_final = c("non-hispanic/unknown", "hispanic"),
   intubation_site          = c("icu", "ed", "or_procedural", "ward", "other", "unknown"),
-  observation_year         = as.character(2016:2026)    # generous range; years with no data anywhere are dropped centrally
+  observation_year         = as.character(2012:2026)    # generous range; years with no data anywhere are dropped centrally
 )
 meas_min_icu_n <- 10   # Safety net only (ICUs are expected to have hundreds+ patients): an ICU below this is
                        # not exported, and the Penn validation applies the same rule so both fits use the same data.
