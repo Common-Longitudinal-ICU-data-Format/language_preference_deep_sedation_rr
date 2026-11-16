@@ -55,8 +55,8 @@ invisible(lapply(packages, install_if_missing))
 
 # ---- Paths ------------------------------------------------------------------
 project_root <- file.path(
-  find_root(rprojroot::has_dir("language_preference_deep_sedation_r&r")),
-  "language_preference_deep_sedation_r&r"
+  find_root(rprojroot::has_dir("language_preference_deep_sedation_rr")),
+  "language_preference_deep_sedation_rr"
 )
 config_dir <- file.path(project_root, "config")
 knitr::opts_knit$set(root.dir = config_dir)
@@ -1566,24 +1566,179 @@ if (!is.null(ipw_model)) {
          "sensitivity_analysis_full_48hr", "sensitivity", weights = full_48hr_cohort$ipw, robust = TRUE,
          note = "completed 48 h, IPW for completion, HC3 robust SE")
 
-  # Diagnostics (unchanged in content; now written to sensitivity_analyses, next to the IPW model)
-  tryCatch({
-    md <- ipw_model_data[as.integer(rownames(model.frame(ipw_model)))]
-    md[, p := fitted(ipw_model)]
-    roc_obj <- pROC::roc(md$reached_48h, md$p, quiet = TRUE)
-    hl_p <- if (requireNamespace("ResourceSelection", quietly = TRUE))
-      ResourceSelection::hoslem.test(md$reached_48h, md$p, g = 10)$p.value else NA_real_
-    fwrite(data.table(site = institution, cohort = "full_48hr_cohort", n_total = nrow(md),
-                      n_reached_48h = sum(md$reached_48h), pct_reached_48h = 100 * mean(md$reached_48h),
-                      c_statistic = as.numeric(pROC::auc(roc_obj)), hl_pvalue = hl_p,
-                      n_winsorized = n_winsorized, trim_lower = ipw_q[1], trim_upper = ipw_q[2],
-                      ess = sum(full_48hr_cohort$ipw)^2 / sum(full_48hr_cohort$ipw^2), weight_type = "unstabilized"),
-           file.path(sedation_sensitivity, paste0(institution, "_ipw_model_diagnostics_full_48hr.csv")))
-    by_lang <- md[!is.na(lang_cat_2), .(n = .N, pct_reached_48h = 100 * mean(reached_48h), mean_p = mean(p),
-                                        n_p_below_05 = sum(p < 0.05)), by = .(lang_cat_2 = as.character(lang_cat_2))]
-    by_lang[, `:=`(site = institution, n = censor_n(n), n_p_below_05 = censor_n(n_p_below_05))]
-    fwrite(by_lang, file.path(sedation_sensitivity, paste0(institution, "_ipw_event_rate_by_lang_full_48hr.csv")))
-  }, error = function(e) message("Skipping IPW diagnostics: ", conditionMessage(e)))
+  # ---- IPW diagnostics for the completed-48-hour analysis (eTables: model, weights, balance) ---------------
+  # Each stage runs on its own and is logged, so one failure (e.g. hoslem.test at a small site) does not
+  # stop the others. Files go to sensitivity_analyses, next to the IPW model; plots stay local.
+  ipw_diag_log <- data.table(site = character(), cohort = character(), stage = character(),
+                             status = character(), error = character())
+  diag_stage <- function(stage, expr) tryCatch({
+    out <- expr
+    ipw_diag_log <<- rbind(ipw_diag_log, data.table(site = institution, cohort = "full_48hr_cohort",
+                                                    stage = stage, status = "success", error = NA_character_))
+    out
+  }, error = function(e) {
+    ipw_diag_log <<- rbind(ipw_diag_log, data.table(site = institution, cohort = "full_48hr_cohort",
+                                                    stage = stage, status = "failed", error = conditionMessage(e)))
+    message("IPW diagnostics, skipping ", stage, ": ", conditionMessage(e))
+    NULL
+  })
+
+  # 1) Completion-model data with predicted P(reaching 48 h)
+  md <- diag_stage("model_data", {
+    d <- ipw_model_data[as.integer(rownames(model.frame(ipw_model)))]
+    d[, predicted_prob := fitted(ipw_model)]
+    d
+  })
+
+  if (!is.null(md)) {
+    # 2) Discrimination: c-statistic with 95% CI
+    disc <- diag_stage("discrimination", {
+      roc_obj <- pROC::roc(md$reached_48h, md$predicted_prob, quiet = TRUE)
+      ci <- tryCatch(as.numeric(pROC::ci.auc(roc_obj)), error = function(e) rep(NA_real_, 3))
+      list(c_stat = as.numeric(pROC::auc(roc_obj)), ci_lb = ci[1], ci_ub = ci[3])
+    })
+    if (is.null(disc)) disc <- list(c_stat = NA_real_, ci_lb = NA_real_, ci_ub = NA_real_)
+
+    # 3) Calibration: Hosmer-Lemeshow with 10 groups, falling back to 5 when the breaks are not unique
+    calib <- NULL
+    hl_available <- requireNamespace("ResourceSelection", quietly = TRUE)
+    if (!hl_available) diag_stage("hoslem", stop("package ResourceSelection is not installed"))
+    if (hl_available) {
+      calib <- diag_stage("hoslem_g10", ResourceSelection::hoslem.test(md$reached_48h, md$predicted_prob, g = 10))
+      if (is.null(calib))
+        calib <- diag_stage("hoslem_g5_fallback", ResourceSelection::hoslem.test(md$reached_48h, md$predicted_prob, g = 5))
+    }
+
+    # 4) Event rate overall and by language group
+    diag_stage("event_rate", {
+      ev <- rbind(md[, .(group = "overall", n = .N, n_reached_48h = sum(reached_48h))],
+                  md[!is.na(lang_cat_2), .(n = .N, n_reached_48h = sum(reached_48h)), by = .(group = as.character(lang_cat_2))])
+      ev[, pct_reached_48h := fifelse(n_reached_48h >= min_cell, 100 * n_reached_48h / n, NA_real_)]
+      ev[, `:=`(site = institution, cohort = "full_48hr_cohort", n = censor_n(n), n_reached_48h = censor_n(n_reached_48h))]
+      fwrite(ev, file.path(sedation_sensitivity, paste0(institution, "_ipw_event_rate_by_lang_full_48hr.csv")))
+    })
+
+    # 5) Distribution of predicted probabilities (positivity check), overall and by language group
+    diag_stage("prob_distribution", {
+      prob_summ <- function(p) list(n = length(p), mean_prob = mean(p), median_prob = median(p), sd_prob = sd(p),
+        min_prob = min(p), max_prob = max(p), p1_prob = unname(quantile(p, .01)), p99_prob = unname(quantile(p, .99)),
+        n_near_zero = sum(p < 0.05), pct_near_zero = 100 * mean(p < 0.05))
+      pr <- rbind(md[, c(list(group = "overall"), prob_summ(predicted_prob))],
+                  md[!is.na(lang_cat_2), prob_summ(predicted_prob), by = .(group = as.character(lang_cat_2))])
+      pr[n < min_cell, c("mean_prob", "median_prob", "sd_prob", "min_prob", "max_prob", "p1_prob", "p99_prob") := NA_real_]
+      pr[n_near_zero > 0 & n_near_zero < min_cell, pct_near_zero := NA_real_]
+      pr[, `:=`(site = institution, cohort = "full_48hr_cohort", n = censor_n(n), n_near_zero = censor_n(n_near_zero))]
+      fwrite(pr, file.path(sedation_sensitivity, paste0(institution, "_ipw_predicted_prob_diagnostics_full_48hr.csv")))
+    })
+
+    # 6) Summary model diagnostics (one row); c-statistic and H-L are NA if their stages failed
+    diag_stage("model_diagnostics_summary", fwrite(data.table(
+      site = institution, cohort = "full_48hr_cohort",
+      n_total = censor_n(nrow(md)), n_reached_48h = censor_n(sum(md$reached_48h)), pct_reached_48h = 100 * mean(md$reached_48h),
+      c_statistic = disc$c_stat, c_stat_ci_lb = disc$ci_lb, c_stat_ci_ub = disc$ci_ub,
+      hl_chisq  = if (!is.null(calib)) unname(calib$statistic) else NA_real_,
+      hl_df     = if (!is.null(calib)) unname(calib$parameter) else NA_real_,
+      hl_pvalue = if (!is.null(calib)) calib$p.value else NA_real_,
+      hl_note   = if (!hl_available) "ResourceSelection not installed" else
+                  if (is.null(calib)) "hoslem.test failed at g = 10 and g = 5; see run log" else NA_character_,
+      n_winsorized = censor_n(n_winsorized), trim_lower = unname(ipw_q[1]), trim_upper = unname(ipw_q[2]),
+      ess = sum(full_48hr_cohort$ipw)^2 / sum(full_48hr_cohort$ipw^2),
+      weight_type = "unstabilized, winsorized at the 1st and 99th percentiles"),
+      file.path(sedation_sensitivity, paste0(institution, "_ipw_model_diagnostics_full_48hr.csv"))))
+  }
+
+  # 7) Weight distribution in the completed-48-h cohort (after winsorizing), overall and by language group
+  diag_stage("weight_distribution", {
+    w_summ <- function(w) list(n = length(w), mean_ipw = mean(w), median_ipw = median(w), sd_ipw = sd(w),
+      min_ipw = min(w), max_ipw = max(w), p25_ipw = unname(quantile(w, .25)), p75_ipw = unname(quantile(w, .75)),
+      p99_ipw = unname(quantile(w, .99)), ess = sum(w)^2 / sum(w^2), ess_pct = 100 * (sum(w)^2 / sum(w^2)) / length(w))
+    wd <- rbind(full_48hr_cohort[, c(list(group = "overall"), w_summ(ipw))],
+                full_48hr_cohort[!is.na(lang_cat_6), w_summ(ipw), by = .(group = as.character(lang_cat_6))])
+    wd[n < min_cell, setdiff(names(wd), c("group", "n")) := NA_real_]
+    wd[, `:=`(site = institution, cohort = "full_48hr_cohort", n = censor_n(n),
+              n_winsorized = fifelse(group == "overall", censor_n(n_winsorized), NA_character_),
+              trim_lower = unname(ipw_q[1]), trim_upper = unname(ipw_q[2]))]
+    fwrite(wd, file.path(sedation_sensitivity, paste0(institution, "_ipw_weight_diagnostics_full_48hr.csv")))
+  })
+
+  # 8) Covariate balance, unweighted vs IPW-weighted
+  #    (a) Spanish vs English completers (the comparison in the original eTable)
+  #    (b) completers vs the whole primary cohort: the comparison completion weights are meant to fix
+  #    Continuous SMD: weighted means over the unweighted pooled SD. Categorical: multilevel SMD (Yang & Dalton)
+  #    on weighted proportions.
+  diag_stage("balance", {
+    smd_cont <- function(x, g, w) {
+      ok <- !is.na(x); x <- x[ok]; g <- g[ok]; w <- w[ok]
+      if (sum(g) < 2 || sum(!g) < 2) return(NA_real_)
+      s <- sqrt((var(x[g]) + var(x[!g])) / 2)
+      if (!is.finite(s) || s == 0) return(NA_real_)
+      (weighted.mean(x[g], w[g]) - weighted.mean(x[!g], w[!g])) / s
+    }
+    smd_cat <- function(x, g, w) {
+      x <- ifelse(is.na(x), "missing", as.character(x))
+      levs <- sort(unique(x)); if (length(levs) < 2 || sum(g) < 2 || sum(!g) < 2) return(NA_real_)
+      keep <- levs[-1]
+      props <- function(sel) vapply(keep, function(l) weighted.mean(x[sel] == l, w[sel]), numeric(1))
+      p1 <- props(g); p0 <- props(!g)
+      S <- (diag(p1, length(keep)) - tcrossprod(p1) + diag(p0, length(keep)) - tcrossprod(p0)) / 2
+      Si <- tryCatch(solve(S), error = function(e) MASS::ginv(S))
+      d <- p1 - p0
+      sqrt(max(0, as.numeric(t(d) %*% Si %*% d)))
+    }
+    bal_cat  <- c("sex_category", "race_category", "ethnicity_category", "age_category")
+    bal_cont <- c("laps2", "elixhauser_score")
+    bal_rows <- function(d, g, w, comparison) rbindlist(c(
+      lapply(intersect(bal_cont, names(d)), function(v) data.table(variable = v, variable_type = "continuous",
+        smd_unweighted = smd_cont(d[[v]], g, rep(1, nrow(d))), smd_weighted = smd_cont(d[[v]], g, w))),
+      lapply(intersect(bal_cat, names(d)), function(v) data.table(variable = v, variable_type = "categorical",
+        smd_unweighted = smd_cat(d[[v]], g, rep(1, nrow(d))), smd_weighted = smd_cat(d[[v]], g, w)))))[, comparison := comparison]
+
+    lang_d <- full_48hr_cohort[as.character(lang_cat_6) %in% c("english", "spanish")]
+    n_slp_48 <- lang_d[as.character(lang_cat_6) == "spanish", .N]
+    bal_lang <- bal_rows(lang_d, as.character(lang_d$lang_cat_6) == "spanish", lang_d$ipw, "spanish_vs_english_completers")
+    if (n_slp_48 < min_cell) bal_lang[, c("smd_unweighted", "smd_weighted") := NA_real_]   # small cell
+
+    tv  <- intersect(c(bal_cat, bal_cont), names(primary_cohort))
+    tgt <- rbind(full_48hr_cohort[, c(tv, "ipw"), with = FALSE][, grp := TRUE],
+                 primary_cohort[, tv, with = FALSE][, `:=`(ipw = 1, grp = FALSE)])
+    bal_tgt <- bal_rows(tgt, tgt$grp, tgt$ipw, "completers_vs_primary_cohort")
+
+    balance_dt <- rbind(bal_lang, bal_tgt)
+    balance_dt[, `:=`(site = institution, cohort = "full_48hr_cohort", smd_change = smd_weighted - smd_unweighted,
+                      balance_improved = abs(smd_weighted) < abs(smd_unweighted))]
+    setcolorder(balance_dt, c("site", "cohort", "comparison", "variable", "variable_type"))
+    fwrite(balance_dt, file.path(sedation_sensitivity, paste0(institution, "_ipw_balance_diagnostics_full_48hr.csv")))
+
+    balance_summary <- balance_dt[, .(n_vars_assessed = sum(!is.na(smd_weighted)),
+      n_vars_balance_improved = sum(balance_improved, na.rm = TRUE),
+      n_vars_smd_below_0.1 = sum(abs(smd_weighted) < 0.1, na.rm = TRUE),
+      max_smd_unweighted = suppressWarnings(max(abs(smd_unweighted), na.rm = TRUE)),
+      max_smd_weighted   = suppressWarnings(max(abs(smd_weighted), na.rm = TRUE))), by = comparison]
+    balance_summary[, `:=`(site = institution, cohort = "full_48hr_cohort",
+                           pct_vars_below_0.1 = fifelse(n_vars_assessed > 0, 100 * n_vars_smd_below_0.1 / n_vars_assessed, NA_real_))]
+    for (cc in c("max_smd_unweighted", "max_smd_weighted")) set(balance_summary, which(!is.finite(balance_summary[[cc]])), cc, NA_real_)
+    fwrite(balance_summary, file.path(sedation_sensitivity, paste0(institution, "_ipw_balance_summary_full_48hr.csv")))
+    print(balance_summary)
+  })
+
+  # 9) Local QA plots (not uploaded): weight density and predicted-probability overlap
+  diag_stage("plots_local", {
+    p1 <- ggplot(full_48hr_cohort[!is.na(lang_cat_6)], aes(x = ipw, fill = lang_cat_6)) +
+      geom_density(alpha = 0.5) + geom_vline(xintercept = ipw_q, linetype = "dashed", colour = "grey40") +
+      labs(title = paste0(institution, ": IPW weights, completed-48-h cohort"), x = "Inverse probability weight",
+           y = "Density", fill = "Language") + theme_minimal()
+    ggsave(file.path(intermediate_dir, paste0(institution, "_ipw_weight_density_full_48hr_LOCAL.png")), p1, width = 8, height = 5, dpi = 200)
+    if (!is.null(md)) {
+      p2 <- ggplot(md[!is.na(lang_cat_2)], aes(x = predicted_prob, fill = lang_cat_2)) +
+        geom_density(alpha = 0.5) + geom_vline(xintercept = 0.05, linetype = "dotted", colour = "red") +
+        labs(title = paste0(institution, ": predicted P(IMV >= 48 h) by language"), x = "Predicted probability",
+             y = "Density", fill = "Language") + theme_minimal()
+      ggsave(file.path(intermediate_dir, paste0(institution, "_ipw_predicted_prob_overlap_full_48hr_LOCAL.png")), p2, width = 8, height = 5, dpi = 200)
+    }
+  })
+
+  fwrite(ipw_diag_log, file.path(sedation_sensitivity, paste0(institution, "_ipw_diagnostics_run_log.csv")))
+  print(ipw_diag_log)
 } else record_result(NULL, "sensitivity_model_full_48", "sensitivity", "full_48hr_cohort", "percent_deep_sedation_48",
                      status = "fit_failed", note = "completion model failed")
 ```

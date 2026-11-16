@@ -55,8 +55,8 @@ stamp <- format(Sys.Date(), "%Y%m%d")
 
 # Define paths
 project_root <- file.path(
-  find_root(rprojroot::has_dir("language_preference_deep_sedation_r&r")),
-  "language_preference_deep_sedation_r&r"
+  find_root(rprojroot::has_dir("language_preference_deep_sedation_rr")),
+  "language_preference_deep_sedation_rr"
 )
 
 config_dir <- file.path(project_root, "config")

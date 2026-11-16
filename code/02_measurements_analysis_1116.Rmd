@@ -31,8 +31,8 @@ invisible(lapply(packages, install_if_missing))
 
 # ---- Paths (same config as the rest of the project) --------------------------
 project_root <- file.path(
-  find_root(rprojroot::has_dir("language_preference_deep_sedation_r&r")),
-  "language_preference_deep_sedation_r&r"
+  find_root(rprojroot::has_dir("language_preference_deep_sedation_rr")),
+  "language_preference_deep_sedation_rr"
 )
 config_dir <- file.path(project_root, "config")
 knitr::opts_knit$set(root.dir = config_dir)
