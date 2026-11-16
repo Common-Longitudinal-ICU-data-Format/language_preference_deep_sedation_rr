@@ -255,7 +255,7 @@ If an input for an optional analysis is missing at your site, the analysis is sk
 
 ### 3. Upload results to Box
 
-Upload the contents of `output/FINAL_DATA_UPLOAD_ME` to the shared Box folder: https://app.box.com/folder/438119061452
+Upload the contents of `output/FINAL_DATA_UPLOAD_ME` to the shared Box folder linked on clif-icu.com
 
 ## Questions
 
