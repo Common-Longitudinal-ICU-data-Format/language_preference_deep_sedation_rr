@@ -557,7 +557,7 @@ make_table1_pair <- function(dt, by, reference_level, cat_vars, cont_vars, site_
 #===============================================================================
 # A. SHARED SPECIFICATION (do not edit at sites)
 #===============================================================================
-dlmm_spec_version <- "meas-dlmm-2026-11-13"   # bumped: continuous outcomes only
+dlmm_spec_version <- "meas-dlmm-2026-11-16"   # bumped: continuous outcomes only
 
 meas_outcomes_continuous <- c("vent_free_days_28_alt", "icu_free_days_28_alt", "hospital_free_days_28_alt")
 # Binary outcomes (trach, in-hospital death, reintubation) are NOT federated: DLMM is exact only for linear models
