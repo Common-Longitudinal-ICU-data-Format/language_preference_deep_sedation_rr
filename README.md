@@ -1,6 +1,6 @@
 # Patient Language Preference and Deep Sedation During Invasive Mechanical Ventilation
 
-**CLIF Version:** 2.1
+**CLIF Version:** 2.1 (works with 3.0 formatting as well)
 
 Measure whether patients with a Spanish-language preference documented in the EHR spend more time in deep sedation during the first 48 hours of invasive mechanical ventilation (IMV) than patients with an English-language preference, and whether secondary outcomes (ventilator-free days, time on IMV, tracheostomy, mortality) differ. This repository also contains the site script for the companion measurements project.
 
