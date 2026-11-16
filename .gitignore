@@ -1,0 +1,30 @@
+# Patient-level and intermediate data - never commit
+intermediate_data_DO_NOT_UPLOAD/
+
+# Site outputs (shared through the federated upload, not GitHub)
+output/
+
+# Data files anywhere, as a backstop
+*.parquet
+*.feather
+*.rds
+*.RData
+*.rda
+*.fst
+*.csv
+
+# Rendered reports and local QA pictures
+*.html
+*_files/
+*_LOCAL.*
+
+# Site-specific config: commit a template instead
+language_sedation_config.yaml
+config/language_sedation_config.yaml
+
+# R / RStudio / OS
+.Rhistory
+.Rproj.user/
+.httr-oauth
+.DS_Store
+Thumbs.db
