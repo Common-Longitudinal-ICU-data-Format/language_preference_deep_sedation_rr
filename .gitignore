@@ -28,3 +28,9 @@ config/language_sedation_config.yaml
 .httr-oauth
 .DS_Store
 Thumbs.db
+
+# Central (pooled) analysis
+/federated_inputs/
+/pooled_outputs/
+code/central/*.html
+code/central/*_files/code/central/
