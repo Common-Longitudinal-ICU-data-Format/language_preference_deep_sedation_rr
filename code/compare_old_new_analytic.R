@@ -36,11 +36,17 @@ find_project <- function(name) {
   }
   stop("Could not find the project folder '", name, "'. Set old_root / new_root at the top of this script.")
 }
-read_project_config <- function(root) {
-  f <- list.files(file.path(root, "config"), pattern = "\\.ya?ml$", full.names = TRUE)
+read_project_config <- function(root, preferred) {
+  # The same file 01/02 read, by name. Templates/examples (which may still hold another site's name) are only a
+  # last resort, and the file actually used is printed so it can be checked.
+  cdir <- file.path(root, "config")
+  f <- c(file.path(cdir, paste0(preferred, c(".yaml", ".yml"))),
+         setdiff(list.files(cdir, pattern = "\\.ya?ml$", full.names = TRUE), file.path(cdir, paste0(preferred, c(".yaml", ".yml")))))
+  f <- f[file.exists(f)]
+  f <- c(f[!grepl("template|example|sample", basename(f), ignore.case = TRUE)], f[grepl("template|example|sample", basename(f), ignore.case = TRUE)])
   for (x in f) { cfg <- tryCatch(read_yaml(x), error = function(e) NULL)
-  if (!is.null(cfg$institution)) return(cfg) }
-  stop("No config with an 'institution' entry in ", file.path(root, "config"))
+  if (!is.null(cfg$institution)) { message("Config used: ", x, "  (institution = ", cfg$institution, ")"); return(cfg) } }
+  stop("No config with an 'institution' entry in ", cdir)
 }
 find_analytic <- function(root, cfg) {
   dirs <- unique(c(file.path(root, "intermediate_data_DO_NOT_UPLOAD"),
@@ -57,7 +63,11 @@ read_any <- function(f) as.data.table(if (grepl("\\.parquet$", f)) arrow::read_p
 `%||%` <- function(a, b) if (is.null(a)) b else a
 old_root <- old_root %||% find_project(old_project_name)
 new_root <- new_root %||% find_project(new_project_name)
-old_cfg <- read_project_config(old_root); new_cfg <- read_project_config(new_root)
+old_cfg <- read_project_config(old_root, "deep_sedation_language_config")
+new_cfg <- read_project_config(new_root, "language_sedation_config")
+if (!identical(old_cfg$institution, new_cfg$institution))
+  warning("The two projects' configs name different institutions: ", old_cfg$institution, " vs ", new_cfg$institution,
+          ". Output files use the revision project's (", new_cfg$institution, ").", call. = FALSE, immediate. = TRUE)
 institution <- new_cfg$institution
 old_file <- find_analytic(old_root, old_cfg); new_file <- find_analytic(new_root, new_cfg)
 message("Institution: ", institution, "\n  old: ", old_file, "  (", format(file.mtime(old_file), "%Y-%m-%d"), ")",
@@ -71,6 +81,11 @@ save_out <- function(dt, name) fwrite(dt, file.path(out_dir, paste0(institution,
 # ---- 2. Read and standardize ------------------------------------------------------------------------------------
 prep <- function(dt) {
   dt <- copy(dt)
+  # Original-submission column names -> revision names, so the same quantity is compared (e.g. begin_imv vs begin_obs)
+  old_new <- c(begin_imv = "begin_obs", end_imv = "end_obs", imv_duration_hours_final = "run_hrs",
+               time_from_begin_imv_to_icu_hours = "time_from_begin_obs_to_icu_hours", reintubation_final = "reintubation",
+               admission_height = "height_cm")
+  for (o in names(old_new)) if (o %in% names(dt) && !old_new[[o]] %in% names(dt)) setnames(dt, o, old_new[[o]])
   if (!"language_category" %in% names(dt)) stop("language_category is missing from ", deparse(substitute(dt)))
   dt[, language_category := tolower(trimws(as.character(language_category)))]
   dt[, lang := fcase(language_category == "english", "english", language_category == "spanish", "spanish",

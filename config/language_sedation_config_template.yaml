@@ -1,5 +1,5 @@
 data_dir: "" #location of tables - make sure to have "/" at the end
 local_dir: "" #location of project directory - make sure to have "/" at the end
 file_type: ".parquet"
-institution: "Penn"
+institution: "" #institution here
 time_zone: "America/New_York"
