@@ -113,7 +113,7 @@ if (!"time_from_begin_obs_to_icu_hours" %in% names(total_cohort) &&
   stop("Not in the analytic file: time_from_begin_obs_to_icu_hours")
 ```
 
-# 3. Table 1 functions (same as 01_analysis_rr.Rmd)
+# 3. Table 1 functions (same as 01_analysis_rr.Rmd; cell-level suppression, Nov 16)
 ```{r table1-functions}
 make_table1_federated <- function(dt, cat_vars = NULL, cont_vars = NULL, by = NULL, site_name = NA_character_) {
   dt <- as.data.table(copy(dt))
@@ -175,36 +175,26 @@ make_table1_federated <- function(dt, cat_vars = NULL, cont_vars = NULL, by = NU
   out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
   setcolorder(out, c("site", "group", "variable", "variable_type", "level", "n", "N", "pct", "mean", "sd", "median", "p25", "p75"))
 
-  # Censoring
-  out[variable_type == "categorical" & n < 10, `:=`(pct = NA_real_)]
-  out[, n_censored := NA_character_]   # FIX: column was created as logical when a table had no categorical rows, which turned "<10" into NA and skipped complementary suppression
-  out[variable_type == "categorical", n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
-  out[variable_type == "categorical" & n < 10, `:=`(n = NA_real_, N = NA_real_)]
-  out[variable_type == "continuous" & n < 10, `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_)]
+  # Censoring (R&R: cell-level). Counts of 1-9 are hidden as "<10"; N stays on every row. Where exactly ONE cell of a
+  # variable x group is hidden, the smallest other cell is hidden too ("suppressed") so it can't be recovered from N.
+  out[, n_censored := NA_character_]
+  cat_i <- out$variable_type == "categorical"
+  out[cat_i, n_censored := fifelse(n < 10, "<10", as.character(n))]
+  if (any(cat_i)) {
+    out[cat_i, n_hidden := sum(n_censored == "<10"), by = .(variable, group)]
+    sec <- out[cat_i & n_hidden == 1 & n_censored != "<10"][order(n)][, .SD[1], by = .(variable, group)]
+    if (nrow(sec)) out[sec, on = .(variable, group, level), n_censored := "suppressed"]
+    out[, n_hidden := NULL]
+  }
+  out[cat_i & n_censored %in% c("<10", "suppressed"), `:=`(n = NA_real_, pct = NA_real_)]
   out[variable_type == "continuous", n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
-  out[variable_type == "continuous" & n < 10, `:=`(n = NA_real_, N = NA_real_)]
+  suppressed_cont_vars <- out[variable_type == "continuous" & n_censored == "<10", unique(variable)]
+  if (length(suppressed_cont_vars) > 0) {
+    out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
+        `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_,
+             n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
+  }
 
-  # Complementary suppression
-  cat_out <- out[variable_type == "categorical"]
-  if (nrow(cat_out) > 0) {
-    suppressed_combos <- unique(cat_out[n_censored == "<10", .(variable, group)])
-    if (nrow(suppressed_combos) > 0) {
-      suppressed_combos[, suppress_flag := TRUE]
-      out <- merge(out, suppressed_combos, by = c("variable", "group"), all.x = TRUE)
-      out[variable_type == "categorical" & !is.na(suppress_flag),
-          `:=`(pct = NA_real_, N = NA_real_, n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
-      out[, suppress_flag := NULL]
-    }
-  }
-  cont_out <- out[variable_type == "continuous"]
-  if (nrow(cont_out) > 0) {
-    suppressed_cont_vars <- cont_out[n_censored == "<10", unique(variable)]
-    if (length(suppressed_cont_vars) > 0) {
-      out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
-          `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_,
-               N = NA_real_, n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
-    }
-  }
   return(out[])
 }
 
@@ -747,7 +737,8 @@ cat("Measurements cohort:", nrow(measurements_project_cohort), "patients in",
 
 # 6. Table 1 (by ICU type) and missingness
 ```{r table1}
-cat_vars <- intersect(c("sex_category", "ethnicity_category_final", "race_category", "hospital_id", "lang_cat_1",
+# R&R: hospital_id removed - hospital names identify the health system and small hospitals create cells of <10
+cat_vars <- intersect(c("sex_category", "ethnicity_category_final", "race_category", "lang_cat_1",
                         "intubation_site", "admission_type_category", "observation_year"),
                       names(measurements_project_cohort))
 cont_vars <- intersect(c("age_at_admission", "bmi", "elixhauser_score", "SVM_SCORE", "laps2", "time_to_first_rass",

@@ -32,5 +32,4 @@ Thumbs.db
 # Central (pooled) analysis
 /federated_inputs/
 /pooled_outputs/
-code/central/*.html
-code/central/*_files/code/central/
+code/central/

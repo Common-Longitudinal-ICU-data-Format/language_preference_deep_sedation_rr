@@ -152,7 +152,11 @@ total_cohort[, observation_year := as.double(observation_year)]
 adt_hosp <- read_table_any(file.path(data_dir, paste0("clif_adt", file_type)))[, .(hospital_id, hospital_type)]
 hospital_type_lookup <- adt_hosp[!is.na(hospital_id), .N, by = .(hospital_id, hospital_type)][order(hospital_id, -N)][
   , .SD[1], by = hospital_id][, .(hospital_id, hospital_type)]
-total_cohort[hospital_type_lookup, on = "hospital_id", hospital_type := i.hospital_type]
+total_cohort[, table1_hospital := if ("icu_hospital_id" %in% names(total_cohort))
+  fcoalesce(as.character(icu_hospital_id), as.character(hospital_id)) else as.character(hospital_id)]
+total_cohort[, hospital_type := NA_character_]
+total_cohort[hospital_type_lookup[, .(table1_hospital = as.character(hospital_id), hospital_type)],
+             on = "table1_hospital", hospital_type := i.hospital_type]
 rm(adt_hosp)
 
 # System-wide language counts written by the cohort pipeline (used for the heterogeneity outputs)
@@ -217,14 +221,14 @@ relevel_cohort <- function(dt) {
 total_cohort <- relevel_cohort(total_cohort)
 
 # Table 1 variables (new pipeline names)
-cat_vars  <- c("sex_category", "ethnicity_category", "race_category", "hospital_id", "hospital_type", "icu_imv",
+cat_vars  <- c("sex_category", "ethnicity_category", "race_category", "hospital_type", "icu_imv",
                "intubation_site", "admission_type_category", "arf_flag", "aHrf_flag", "era")
 cont_vars <- c("age_at_admission", "bmi", "elixhauser_score", "SVM_SCORE", "laps2", "time_to_first_rass",
                "rass_frequency_hrs", "observation_year", "time_from_begin_obs_to_icu_hours")
 cat_vars  <- intersect(cat_vars, names(total_cohort)); cont_vars <- intersect(cont_vars, names(total_cohort))
 ```
 
-# 4. Table 1 (federated descriptive + pairwise comparison) functions - original, one fix (n_censored type)
+# 4. Table 1 (federated descriptive + pairwise comparison) functions - R&R: cell-level suppression (Nov 16)
 ```{r table1-functions}
 make_table1_federated <- function(dt, cat_vars = NULL, cont_vars = NULL, by = NULL, site_name = NA_character_) {
   dt <- as.data.table(copy(dt))
@@ -286,36 +290,26 @@ make_table1_federated <- function(dt, cat_vars = NULL, cont_vars = NULL, by = NU
   out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
   setcolorder(out, c("site", "group", "variable", "variable_type", "level", "n", "N", "pct", "mean", "sd", "median", "p25", "p75"))
 
-  # Censoring
-  out[variable_type == "categorical" & n < 10, `:=`(pct = NA_real_)]
-  out[, n_censored := NA_character_]   # FIX: column was created as logical when a table had no categorical rows, which turned "<10" into NA and skipped complementary suppression
-  out[variable_type == "categorical", n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
-  out[variable_type == "categorical" & n < 10, `:=`(n = NA_real_, N = NA_real_)]
-  out[variable_type == "continuous" & n < 10, `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_)]
+  # Censoring (R&R: cell-level). Counts of 1-9 are hidden as "<10"; N stays on every row. Where exactly ONE cell of a
+  # variable x group is hidden, the smallest other cell is hidden too ("suppressed") so it can't be recovered from N.
+  out[, n_censored := NA_character_]
+  cat_i <- out$variable_type == "categorical"
+  out[cat_i, n_censored := fifelse(n < 10, "<10", as.character(n))]
+  if (any(cat_i)) {
+    out[cat_i, n_hidden := sum(n_censored == "<10"), by = .(variable, group)]
+    sec <- out[cat_i & n_hidden == 1 & n_censored != "<10"][order(n)][, .SD[1], by = .(variable, group)]
+    if (nrow(sec)) out[sec, on = .(variable, group, level), n_censored := "suppressed"]
+    out[, n_hidden := NULL]
+  }
+  out[cat_i & n_censored %in% c("<10", "suppressed"), `:=`(n = NA_real_, pct = NA_real_)]
   out[variable_type == "continuous", n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
-  out[variable_type == "continuous" & n < 10, `:=`(n = NA_real_, N = NA_real_)]
+  suppressed_cont_vars <- out[variable_type == "continuous" & n_censored == "<10", unique(variable)]
+  if (length(suppressed_cont_vars) > 0) {
+    out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
+        `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_,
+             n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
+  }
 
-  # Complementary suppression
-  cat_out <- out[variable_type == "categorical"]
-  if (nrow(cat_out) > 0) {
-    suppressed_combos <- unique(cat_out[n_censored == "<10", .(variable, group)])
-    if (nrow(suppressed_combos) > 0) {
-      suppressed_combos[, suppress_flag := TRUE]
-      out <- merge(out, suppressed_combos, by = c("variable", "group"), all.x = TRUE)
-      out[variable_type == "categorical" & !is.na(suppress_flag),
-          `:=`(pct = NA_real_, N = NA_real_, n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
-      out[, suppress_flag := NULL]
-    }
-  }
-  cont_out <- out[variable_type == "continuous"]
-  if (nrow(cont_out) > 0) {
-    suppressed_cont_vars <- cont_out[n_censored == "<10", unique(variable)]
-    if (length(suppressed_cont_vars) > 0) {
-      out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
-          `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_, p25 = NA_real_, p75 = NA_real_,
-               N = NA_real_, n_censored = ifelse(n_censored == "<10", "<10", "suppressed"), n = NA_real_)]
-    }
-  }
   return(out[])
 }
 
@@ -767,7 +761,7 @@ fit_model_safe <- function(outcome, exposure = NULL, covariates, data, model_nam
 # forest plot of all sensitivity analyses (R3.17) and the eTables from one file per site.
 ################################################################################
 results_registry <- list()
-censor_n <- function(n) ifelse(is.na(n), NA_character_, ifelse(n < min_cell, paste0("<", min_cell), as.character(n)))
+censor_n <- function(n) ifelse(is.na(n), NA_character_, ifelse(n > 0 & n < min_cell, paste0("<", min_cell), as.character(n)))
 
 record_result <- function(model, analysis, analysis_group, cohort_name, outcome, term_pattern = "^lang_cat_6spanish$",
                           exposure = "lang_cat_6", ref_level = "english", target_level = "spanish", vcov_mat = NULL,
@@ -1098,7 +1092,7 @@ if (length(elix_flag_cols)) {
   # Prevalence by language (eTable): counts censored below min_cell
   flag_prev <- rbindlist(lapply(elix_flag_cols, function(f) primary_cohort_flags[, .(comorbidity = f, n = sum(get(f) %in% c(1, TRUE)), N = .N),
                                                                                    by = .(lang_cat_6 = as.character(lang_cat_6))]))
-  flag_prev[, `:=`(pct = fifelse(n >= min_cell, 100 * n / N, NA_real_), n = censor_n(n), site = institution,
+  flag_prev[, `:=`(pct = fifelse(n >= min_cell | n == 0, 100 * n / N, NA_real_), n = censor_n(n), site = institution,
                    in_model = comorbidity %in% model_flags)]
   fwrite(flag_prev, file.path(sedation_rr, paste0(institution, "_elixhauser_indicator_prevalence.csv")))
   run_lm("percent_deep_sedation_48", primary_cohort_flags, "rr_individual_elixhauser", "primary_cohort", sedation_rr,
@@ -1365,7 +1359,7 @@ if ("covid_any" %in% names(primary_cohort)) {
   # (3) % with COVID-19 by language group, by era
   covid_by_lang <- primary_cohort[, .(n = .N, n_covid = sum(covid_any %in% TRUE)),
                                   by = .(era = as.character(era), lang_cat_6 = as.character(lang_cat_6))]
-  covid_by_lang[, pct_covid := fifelse(n_covid >= min_cell, 100 * n_covid / n, NA_real_)]
+  covid_by_lang[, pct_covid := fifelse(n_covid >= min_cell | n_covid == 0, 100 * n_covid / n, NA_real_)]
   covid_by_lang[, `:=`(site = institution, n = censor_n(n), n_covid = censor_n(n_covid))]
   fwrite(covid_by_lang, file.path(sedation_rr, paste0(institution, "_covid_by_language_era.csv")))
 } else for (a in c("rr_covid_adjusted", "subgroup_model_pandemic_no_covid_cohort"))
@@ -1613,7 +1607,7 @@ if (!is.null(ipw_model)) {
     diag_stage("event_rate", {
       ev <- rbind(md[, .(group = "overall", n = .N, n_reached_48h = sum(reached_48h))],
                   md[!is.na(lang_cat_2), .(n = .N, n_reached_48h = sum(reached_48h)), by = .(group = as.character(lang_cat_2))])
-      ev[, pct_reached_48h := fifelse(n_reached_48h >= min_cell, 100 * n_reached_48h / n, NA_real_)]
+      ev[, pct_reached_48h := fifelse(n_reached_48h >= min_cell | n_reached_48h == 0, 100 * n_reached_48h / n, NA_real_)]
       ev[, `:=`(site = institution, cohort = "full_48hr_cohort", n = censor_n(n), n_reached_48h = censor_n(n_reached_48h))]
       fwrite(ev, file.path(sedation_sensitivity, paste0(institution, "_ipw_event_rate_by_lang_full_48hr.csv")))
     })
